@@ -1,0 +1,107 @@
+{
+    "status":  "completed",
+    "model":  "gpt-6.1-sol",
+    "codex_version":  "codex-cli 0.167.2",
+    "inputs":  {
+                   "target":  "C:\\Users\\saram\\cross-review-poc\\fixtures\\test-items.md",
+                   "evidence":  [
+                                    "C:\\Users\\saram\\cross-review-poc\\fixtures\\spec.md"
+                                ],
+                   "criteria":  "C:\\Users\\saram\\cross-review-poc\\fixtures\\criteria.md"
+               },
+    "findings":  [
+                     {
+                         "severity":  "critical",
+                         "location":  "target/test-items.md: T2",
+                         "description":  "下限を外れる id=0 の登録成功を期待している。",
+                         "evidence":  "R1 は id を1以上の整数と定めているが、T2 は0で登録に成功するとしている。",
+                         "suggestion":  "期待結果を登録失敗に修正する。T9と確認内容が重複するため統合も検討する。"
+                     },
+                     {
+                         "severity":  "critical",
+                         "location":  "target/test-items.md: T4",
+                         "description":  "上限を超える21文字の name の登録成功を期待している。",
+                         "evidence":  "R2 は name を1文字以上20文字以下と定めている。",
+                         "suggestion":  "期待結果を登録失敗に修正する。"
+                     },
+                     {
+                         "severity":  "critical",
+                         "location":  "target/test-items.md: T5",
+                         "description":  "許可されていない status=archived の登録成功を期待している。",
+                         "evidence":  "R3 が許可する status は draft または active のみである。",
+                         "suggestion":  "期待結果を登録失敗に修正する。"
+                     },
+                     {
+                         "severity":  "critical",
+                         "location":  "target/test-items.md: T8",
+                         "description":  "作成後の id の変更成功を期待している。",
+                         "evidence":  "R6 は id を作成後に変更できないと定めている。",
+                         "suggestion":  "変更が拒否され、元の id が保持されることを期待結果にする。"
+                     },
+                     {
+                         "severity":  "major",
+                         "location":  "target/test-items.md: T2、T9",
+                         "description":  "同じ id=0 の登録に対し、成功と失敗の相反する期待結果がある。",
+                         "evidence":  "T2とT9の条件は同一だが、T2は登録成功、T9は登録失敗としている。",
+                         "suggestion":  "R1に合わせて登録失敗に統一する。"
+                     },
+                     {
+                         "severity":  "major",
+                         "location":  "target/test-items.md: T3",
+                         "description":  "期待結果が空で、name が空の場合の合否を判定できない。",
+                         "evidence":  "R2 は name を必須かつ1文字以上としているが、T3の期待結果欄には記載がない。",
+                         "suggestion":  "空の name では登録に失敗することを明記する。"
+                     },
+                     {
+                         "severity":  "major",
+                         "location":  "target/test-items.md: T6",
+                         "description":  "存在しない要求R9を参照しており、手順と期待結果の根拠を確認できない。",
+                         "evidence":  "evidence/spec.md の要求はR1からR6までであり、R9は存在しない。",
+                         "suggestion":  "実在する要求に基づく具体的な条件と期待結果に置き換える。"
+                     },
+                     {
+                         "severity":  "major",
+                         "location":  "target/test-items.md: R1対応項目（T1、T2、T9）",
+                         "description":  "id の必須性、整数制約、既存記録との重複禁止を確認する手順がない。",
+                         "evidence":  "R1 はこれらを要求するが、対象では id=1 と id=0 の登録のみを扱っている。",
+                         "suggestion":  "id 未指定、非整数、既存記録と同じ id での登録が拒否される試験を追加する。"
+                     },
+                     {
+                         "severity":  "major",
+                         "location":  "target/test-items.md: R2対応項目（T3、T4）",
+                         "description":  "name の先頭・末尾の空白禁止と、許容範囲内の値を受け付けることの確認がない。",
+                         "evidence":  "R2 は1〜20文字を許容し、先頭と末尾の空白を禁止する。対象は空文字と21文字のみを扱っている。",
+                         "suggestion":  "先頭または末尾に空白を含む値の拒否と、空白のない1文字・20文字の値の受け付けを確認する試験を追加する。"
+                     },
+                     {
+                         "severity":  "major",
+                         "location":  "target/test-items.md: R3対応項目（T5）",
+                         "description":  "status の必須性、許可値 draft・active、初期値 draft の確認がない。",
+                         "evidence":  "R3 はこれらを定めているが、T5は archived の指定のみを扱っている。",
+                         "suggestion":  "初期値が draft であること、必須性、正常な id・name のもとで draft と active が受け付けられることを確認する試験を追加する。"
+                     },
+                     {
+                         "severity":  "major",
+                         "location":  "target/test-items.md: R4対応項目（T7）",
+                         "description":  "note が任意であることと、100文字を超える値の拒否を確認していない。",
+                         "evidence":  "R4 は note を任意かつ最大100文字とする。T7の100文字での登録成功は正しいが、未指定時と上限超過時の確認はない。",
+                         "suggestion":  "note 未指定での登録成功と、101文字での登録失敗を確認する試験を追加する。"
+                     },
+                     {
+                         "severity":  "major",
+                         "location":  "target/test-items.md: 全体（R5対応項目なし）",
+                         "description":  "id と name が仕様を満たす場合だけ active にできるという条件の確認がない。",
+                         "evidence":  "R5 は active にするための条件を定めているが、対象にはその条件を確認する手順がない。",
+                         "suggestion":  "id または name が不適合な場合は active にできず、両方が適合する場合は active にできることを確認する試験を追加する。"
+                     }
+                 ],
+    "access_control":  {
+                           "mechanism":  "cross-review profile via the same -c flags; sandbox uses an empty CODEX_HOME and --include-managed-config because sandbox has no --ignore-user-config or --ignore-rules; exec uses those flags",
+                           "workspace_read":  true,
+                           "outside_read_denied":  true,
+                           "write_denied":  true,
+                           "os_can_read_outside_file":  true
+                       },
+    "sources_unchanged":  true,
+    "workspace_deleted":  true
+}
