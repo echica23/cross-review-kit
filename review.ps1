@@ -1,8 +1,8 @@
-# Cross-review Kit.
+﻿# Cross-review Kit.
 # Copies only the requested inputs into a temporary workspace, checks that
 # Codex's own permission profile (not the copy itself) confines file access,
 # then runs a fresh non-interactive read-only review.
-# Requires Windows PowerShell 5.1 and Codex CLI. Uses the existing Codex login.
+# Requires Windows PowerShell 5.1. See README for provider readiness and authentication.
 # Do not pass --sandbox: that selects the legacy sandbox, which can read the
 # whole disk and disables permission profiles.
 
@@ -12,7 +12,8 @@ param(
     [string[]]$Evidence = @(),
     [string]$Criteria,
     [string]$Output = "review-result.json",
-    [string]$Model = "gpt-6.1-sol",
+    [string]$Model = "",
+    [ValidateSet("codex", "copilot")][string]$Provider = "codex",
     [switch]$SelfTest
 )
 
@@ -21,6 +22,12 @@ Add-Type -AssemblyName System.Web.Extensions
 
 $script:ProfileName = "cross-review"
 $script:InsideMarker = "INSIDE_OK"
+$Provider = $Provider.ToLowerInvariant()
+if (-not $PSBoundParameters.ContainsKey('Model') -and $Provider -eq 'codex') {
+    $Model = 'gpt-6.1-sol'
+}
+$script:ModelWasSpecified = $PSBoundParameters.ContainsKey('Model')
+. (Join-Path $PSScriptRoot ("providers\{0}.ps1" -f $Provider))
 
 function Write-Utf8File {
     param(
@@ -194,60 +201,6 @@ function Remove-RunDirectory {
     }
 }
 
-function Get-CodexConfigArguments {
-    param([Parameter(Mandatory = $true)][string]$Workspace)
-    Assert-SafeSandboxPath -Path $Workspace
-    $workspaceRule = 'permissions.{0}.filesystem."{1}"="read"' -f $script:ProfileName, $Workspace
-    return @(
-        "-c", 'windows.sandbox="mxc"',
-        "-c", "features.prefer_mxc=true",
-        "-c", ('default_permissions="{0}"' -f $script:ProfileName),
-        "-c", ('permissions.{0}.extends=":read-only"' -f $script:ProfileName),
-        "-c", ('permissions.{0}.network.enabled=false' -f $script:ProfileName),
-        "-c", ('permissions.{0}.filesystem.":root"="deny"' -f $script:ProfileName),
-        "-c", ('permissions.{0}.filesystem.":minimal"="read"' -f $script:ProfileName),
-        "-c", ('permissions.{0}.filesystem.":tmpdir"="deny"' -f $script:ProfileName),
-        "-c", ('permissions.{0}.filesystem.":slash_tmp"="deny"' -f $script:ProfileName),
-        "-c", $workspaceRule,
-        "-c", 'web_search="disabled"',
-        "-c", 'approval_policy="never"'
-    )
-}
-
-function Invoke-Codex {
-    param(
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [string]$CodexHome
-    )
-    $previous = $ErrorActionPreference
-    $previousHome = $env:CODEX_HOME
-    $changeHome = $PSBoundParameters.ContainsKey("CodexHome")
-    $ErrorActionPreference = "Continue"
-    try {
-        if ($changeHome) {
-            $env:CODEX_HOME = $CodexHome
-        }
-        $output = & codex @Arguments 2>&1 | Out-String -Width 4096
-        $code = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previous
-        if ($changeHome) {
-            if ([string]::IsNullOrEmpty($previousHome)) {
-                Remove-Item Env:\CODEX_HOME -ErrorAction SilentlyContinue
-            } else {
-                $env:CODEX_HOME = $previousHome
-            }
-        }
-    }
-    if ($null -eq $code) {
-        $code = 1
-    }
-    return [pscustomobject]@{
-        ExitCode = [int]$code
-        Output   = [string]$output
-    }
-}
-
 function Test-MapKey {
     param($Map, $Key)
     if ($null -eq $Map) {
@@ -382,7 +335,7 @@ function Get-ReviewOutcome {
     if ($ExitCode -ne 0) {
         $message = $CliError
         if ([string]::IsNullOrWhiteSpace($message)) {
-            $message = "Codex CLI が終了コード $ExitCode で失敗しました。"
+            $message = "レビュー CLI が終了コード $ExitCode で失敗しました。"
         }
         return New-FailedResult -Type "cli_exit" -Message $message -ExitCode $ExitCode
     }
@@ -505,86 +458,6 @@ function Get-LastNonEmptyLines {
     return $tail
 }
 
-function Invoke-AccessProbe {
-    param(
-        [Parameter(Mandatory = $true)][string]$RunRoot,
-        [Parameter(Mandatory = $true)][string]$Workspace
-    )
-    $insidePath = Join-Path $Workspace "access-probe.txt"
-    $canaryPath = Join-Path (Join-Path $RunRoot "outside") "canary.txt"
-    $writePath = Join-Path $Workspace "access-write-probe.txt"
-    $token = "CANARY-" + [guid]::NewGuid().ToString("N")
-
-    Assert-SafeSandboxPath -Path $insidePath
-    Assert-SafeSandboxPath -Path $canaryPath
-    Assert-SafeSandboxPath -Path $writePath
-
-    Write-Utf8File -Path $insidePath -Text $script:InsideMarker
-    Write-Utf8File -Path $canaryPath -Text $token
-
-    $osText = [System.IO.File]::ReadAllText($canaryPath).Trim()
-    $osCanRead = ($osText -eq $token)
-
-    $isolatedHome = Join-Path $RunRoot "codex-home"
-    New-Item -ItemType Directory -Force -Path $isolatedHome | Out-Null
-    $config = Get-CodexConfigArguments -Workspace $Workspace
-    $sandboxArgs = $config + @(
-        "sandbox",
-        "--include-managed-config",
-        "--permission-profile", $script:ProfileName,
-        "-C", $Workspace,
-        "--",
-        "cmd.exe", "/d", "/c"
-    )
-    $inside = Invoke-Codex -CodexHome $isolatedHome -Arguments (
-        $sandboxArgs + @(('type "{0}"' -f $insidePath))
-    )
-    $outside = Invoke-Codex -CodexHome $isolatedHome -Arguments (
-        $sandboxArgs + @(('type "{0}"' -f $canaryPath))
-    )
-    $write = Invoke-Codex -CodexHome $isolatedHome -Arguments (
-        $sandboxArgs + @(('echo WRITE_MARKER> "{0}"' -f $writePath))
-    )
-
-    $insideText = [string]$inside.Output
-    $outsideText = [string]$outside.Output
-    $workspaceRead = ($inside.ExitCode -eq 0 -and $insideText.Contains($script:InsideMarker))
-    $outsideDenied = (
-        $outside.ExitCode -ne 0 -and
-        -not $outsideText.Contains($token)
-    )
-    $writeDenied = (
-        $write.ExitCode -ne 0 -and
-        -not (Test-Path -LiteralPath $writePath)
-    )
-
-    Remove-Item -LiteralPath $insidePath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $writePath -Force -ErrorAction SilentlyContinue
-
-    $probe = New-Object System.Collections.Specialized.OrderedDictionary
-    $probe["mechanism"] = "cross-review profile via the same -c flags; sandbox uses an empty CODEX_HOME and --include-managed-config because sandbox has no --ignore-user-config or --ignore-rules; exec uses those flags"
-    $probe["workspace_read"] = $workspaceRead
-    $probe["outside_read_denied"] = $outsideDenied
-    $probe["write_denied"] = $writeDenied
-    $probe["os_can_read_outside_file"] = $osCanRead
-
-    $failure = $null
-    if (-not $osCanRead) {
-        $failure = "アクセス制御の確認用ファイルを、サンドボックス外から読めませんでした。"
-    } elseif (-not $workspaceRead) {
-        $failure = "権限プロファイルが、レビュー用ワークスペースの読み取りを許可しませんでした。"
-    } elseif (-not $outsideDenied) {
-        $failure = "権限プロファイルが、ワークスペース外のファイルの読み取りを拒否しませんでした。"
-    } elseif (-not $writeDenied) {
-        $failure = "権限プロファイルが、ワークスペースへの書き込みを拒否しませんでした。"
-    }
-
-    return [pscustomobject]@{
-        Probe   = $probe
-        Failure = $failure
-    }
-}
-
 function Add-CommonFields {
     param(
         $Result,
@@ -596,8 +469,12 @@ function Add-CommonFields {
     )
     $wrapped = New-Object System.Collections.Specialized.OrderedDictionary
     $wrapped["status"] = $Result["status"]
+    $wrapped["provider"] = $Provider
     $wrapped["model"] = $ModelName
-    $wrapped["codex_version"] = $CodexVersion
+    $wrapped["model_selection"] = $(if ([string]::IsNullOrWhiteSpace($ModelName)) { 'provider_default' } else { 'requested' })
+    $wrapped["actual_model"] = $null
+    $wrapped["cli_version"] = $CodexVersion
+    if ($Provider -eq "codex") { $wrapped["codex_version"] = $CodexVersion }
     $wrapped["inputs"] = $Inputs
     $wrapped["findings"] = $Result["findings"]
     if (Test-MapKey -Map $Result -Key "error") {
@@ -784,11 +661,11 @@ function Invoke-CrossReview {
 
     try {
         $outputPath = Get-ComparablePath -Path $Output
-        if ([string]::IsNullOrWhiteSpace($Model)) {
+        if (($Provider -eq "codex" -or $script:ModelWasSpecified) -and [string]::IsNullOrWhiteSpace($Model)) {
             throw "モデルが指定されていません。"
         }
-        if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
-            throw "codex コマンドが見つかりません。"
+        if (-not (Get-Command $Provider -ErrorAction SilentlyContinue)) {
+            throw "$Provider コマンドが見つかりません。"
         }
 
         $targetPath = Resolve-ExistingPath -Path $Target -Label "レビュー対象"
@@ -801,9 +678,9 @@ function Invoke-CrossReview {
             $evidencePaths += Resolve-ExistingPath -Path $item -Label "根拠資料"
         }
 
-        $versionResult = Invoke-Codex -Arguments @("--version")
+        $versionResult = Get-ProviderVersion
         if ($versionResult.ExitCode -ne 0) {
-            throw "codex --version に失敗しました。"
+            throw "$Provider --version に失敗しました。"
         }
         $codexVersion = ($versionResult.Output -replace "\s+", " ").Trim()
         $inputs = New-InputRecord -TargetPath $targetPath -EvidencePaths $evidencePaths -CriteriaPath $criteriaPath
@@ -830,62 +707,17 @@ function Invoke-CrossReview {
             [void](Copy-ReviewInput -Source $evidencePath -DestinationDirectory (Join-Path $workspace "evidence"))
         }
 
-        Write-Host "Codex のファイルアクセス制御を検証しています。"
-        $probeResult = Invoke-AccessProbe -RunRoot $runRoot -Workspace $workspace
+        Write-Host "$Provider のファイルアクセス制御を検証しています。"
+        $probeResult = Test-ProviderAccess -RunRoot $runRoot -Workspace $workspace
         if ($probeResult.Failure) {
             $result = Add-CommonFields -Result (New-FailedResult -Type "access_control" -Message $probeResult.Failure) `
                 -ModelName $Model -CodexVersion $codexVersion -Inputs $inputs -AccessControl $probeResult.Probe -SourcesUnchanged $true
             $exitCode = 1
         } else {
-            $schemaPath = Join-Path $runRoot "schema.json"
-            $lastMessagePath = Join-Path $runRoot "last-message.json"
-            $stdoutPath = Join-Path $runRoot "stdout.jsonl"
-            $stderrPath = Join-Path $runRoot "stderr.txt"
-            Write-Utf8File -Path $schemaPath -Text (Get-SchemaText)
-
-            $execArguments = @(
-                "exec",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--ephemeral",
-                "--skip-git-repo-check",
-                "--color", "never",
-                "--json",
-                "-m", $Model,
-                "-C", $workspace,
-                "--output-schema", $schemaPath,
-                "-o", $lastMessagePath
-            ) + (Get-CodexConfigArguments -Workspace $workspace) + @(Get-ReviewPrompt)
-
-            Write-Host "Codex CLI でレビューを実行しています。"
-            $previous = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            try {
-                & codex @execArguments > $stdoutPath 2> $stderrPath
-                $execCode = $LASTEXITCODE
-            } finally {
-                $ErrorActionPreference = $previous
-            }
-            if ($null -eq $execCode) {
-                $execCode = 1
-            }
-
-            $messageText = ""
-            if (Test-Path -LiteralPath $lastMessagePath) {
-                $messageText = [System.IO.File]::ReadAllText($lastMessagePath)
-            }
-            $stderrText = ""
-            if (Test-Path -LiteralPath $stderrPath) {
-                $stderrText = [System.IO.File]::ReadAllText($stderrPath)
-            }
-            $stdoutText = ""
-            if (Test-Path -LiteralPath $stdoutPath) {
-                $stdoutText = [System.IO.File]::ReadAllText($stdoutPath)
-            }
-            $cliError = Get-LastNonEmptyLines -Text $stderrText
-            if ([string]::IsNullOrWhiteSpace($cliError) -and $execCode -ne 0) {
-                $cliError = Get-LastNonEmptyLines -Text $stdoutText
-            }
+            $execution = Invoke-ProviderReview -RunRoot $runRoot -Workspace $workspace -Model $Model
+            $execCode = $execution.ExitCode
+            $messageText = $execution.MessageText
+            $cliError = $execution.CliError
 
             $sourcesUnchanged = $true
             foreach ($path in @($before.Keys)) {

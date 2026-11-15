@@ -1,8 +1,36 @@
 # Cross Review Kit
 
-作成側の会話履歴を渡さず、別プロセスの Codex CLI にレビューさせる最小構成です。対象は試験項目、ソースコード、設計書のいずれでもよく、レビュー指示自体は業務固有の内容を持ちません。
+作成側の会話履歴を渡さず、別プロセスの CLI にレビューさせる構成です。現在レビューを実行できるのは Codex です。Copilot は選択・応答変換の土台のみで、アクセス検証と安全な起動は未実装のため停止します。対象は試験項目、ソースコード、設計書のいずれでもよく、レビュー指示自体は業務固有の内容を持ちません。
 
-## 前提
+## プロバイダー選択（2026-11-15追加）
+
+既存コマンドは変更せず利用できます。`-Provider codex` の明示も可能です。
+`-Provider copilot` は、CLIがなければ終了コード2の準備失敗、CLIがあっても事前検証未実装のため終了コード1の `access_control` になります。モデルは呼びません。
+**Copilotでのレビューはまだ利用できません。職場PCでCLIを導入するだけでは解除されません。**
+残っている実装と実機確認は [Copilot検証手順](docs/copilot-validation.md) を参照してください。
+
+結果には `provider`、`cli_version`、`model_selection`、`actual_model` を追加しました。
+`model` は要求したモデルであり、実使用モデルを確認できない場合の `actual_model` は `null` です。
+Codexの場合は互換性のため `codex_version` も残します。Copilotのモデル省略時は `model_selection: provider_default` です。
+
+### Agent向けの使い方
+
+1. 対象・根拠資料・レビュー基準・入力と重ならない結果保存先を指定する。
+2. プロバイダーを指定された場合は従う。失敗や指摘を理由に勝手に別プロバイダーへ切り替えない。
+3. コマンドの終了を待ち、終了コードと今回の結果を両方確認する。以前の結果を今回の成功扱いしない。
+4. `completed` のみをレビュー成立と扱う。`findings: []` は指摘なし。`not_reviewable` と `failed` は区別して報告する。
+5. 指摘への修正、再レビュー、公開は利用者から依頼された範囲で行う。このkit自体は修正を行わない。
+
+### オフライン検証
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\review.ps1 -SelfTest
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\providers.tests.ps1
+```
+
+後者は引数構築、指摘0件・1件、レビュー不能、不正応答、CLI失敗、実行禁止、模擬CLIでの入口からの停止と後片付けを確認します。Copilot実機の認証・権限制御・モデル実行の確認ではありません。
+
+## Codex実行の前提
 
 - Windows PowerShell 5.1
 - Codex CLI 0.167.2（`codex --version` で確認）
@@ -16,7 +44,9 @@
 
 | パス | 役割 |
 | --- | --- |
-| `review.ps1` | コピー、アクセス制御の確認、Codex 実行、結果の検証 |
+| `review.ps1` | 共通の入力保護、コピー、プロバイダー選択、結果保存 |
+| `providers/codex.ps1` | 既存のCodex権限検証と実行 |
+| `providers/copilot.ps1` | Copilot用の土台。事前検証未実装のため実行禁止 |
 | `fixtures/spec.md` | 根拠資料。汎用的な記録項目の仕様 |
 | `fixtures/test-items.md` | レビュー対象。仕様との不整合を意図的に含む試験項目 |
 | `fixtures/criteria.md` | レビュー基準。網羅、整合、参照、判定可能性、境界 |
@@ -40,10 +70,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\review.ps1 `
 | `-Evidence` | 根拠資料。複数指定できる。省略時は空 |
 | `-Criteria` | レビュー基準のファイルまたはディレクトリ |
 | `-Output` | 結果 JSON のパス。既定は `review-result.json` |
-| `-Model` | 既定は `gpt-6.1-sol` |
+| `-Provider` | `codex` または `copilot`。省略時は `codex` |
+| `-Model` | Codex省略時は `gpt-6.1-sol`。Copilot省略時はCLI既定を意図する |
 | `-SelfTest` | モデルを呼ばず、結果の分類だけを確認する |
 
-`-Evidence` を繰り返すか、カンマ区切りで複数渡せます。指定したパスだけを一時ワークスペースへコピーします。
+複数の根拠資料はPowerShell内から `& .\review.ps1 -Evidence @("spec-a.md", "spec-b.md") ...` のように配列で渡します。同じ引数の繰り返しや `powershell -File` 経由での配列指定は避けてください。指定したパスだけを一時ワークスペースへコピーします。
 
 `-Output` は正規化した絶対パスで比較します。対象・根拠資料・レビュー基準のいずれかと同じファイル、またはそれらがディレクトリのときその内部へは書きません。比較に使うパスは、入力確認や CLI 確認の前に元の引数から取ります。書き込む直前に必ず確認し、危険な場合も、安全性を確認できない場合も、失敗 JSON を含め書きません。終了コードは 2 です。
 
@@ -178,7 +209,7 @@ T1（`id=1` の成功）と T7（`note` 100 文字の成功）は、仕様に合
 
 ## 制限
 
-- 再レビューと、複数プロバイダーへの振り分けは行いません。
+- 自動再レビューや別プロバイダーへの自動切り替えは行いません。
 - 読み取り拒否は MXC で確認しています。MXC を使えない環境ではレビューを開始しません。
 - `:minimal` はコマンド実行に必要な基盤パスを読むため、ディスク上のすべてのパスを拒否するわけではありません。
 - 権限プロファイルは Codex の beta 機能です。
